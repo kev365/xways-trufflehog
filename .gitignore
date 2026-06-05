@@ -1,0 +1,41 @@
+# --- Build artefacts (output of build.bat) ---------------------------------
+*.obj
+*.res
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.exe
+
+# DLL is built fresh by build.bat; it ships in tagged releases, not in source.
+*.dll
+
+# build.bat assembles the deployable bundle under xtensions/<name>/. This is
+# a build product -- ignore the whole subtree. The release zip is built from
+# this folder, but the folder itself is not committed.
+/xtensions/
+
+# --- Active configuration (NOT the .example template) ----------------------
+xways-trufflehog.cfg
+xways-trufflehog.cfg.bak
+
+# --- TruffleHog binary (analysts download separately; ~160 MB) -------------
+tools/trufflehog/trufflehog.exe
+
+# --- Local release packaging ----------------------------------------------
+*.zip
+*.7z
+/dist/
+
+# --- IDE / editor ----------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln
+
+# --- OS junk ---------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store

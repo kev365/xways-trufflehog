@@ -1,0 +1,51 @@
+# example.yml -- minimal TruffleHog custom-detector pack.
+#
+# Schema reference: https://docs.trufflesecurity.com/custom-detectors
+#
+# Each detector has:
+#   - name      : ends up as "trufflehog: custom:<name>" in the Report Table.
+#   - keywords  : pre-filter; TruffleHog only runs the regex on chunks
+#                 that contain at least one keyword. Big perf win on
+#                 long files. Case-insensitive.
+#   - regex     : the actual match. Use named capture groups; each name
+#                 surfaces as its own ExtraData field on the hit.
+#   - verify    : OPTIONAL live-check block. xways-trufflehog defaults to
+#                 --no-verification, so verify blocks are inert unless
+#                 the analyst opts in via Extra arguments --only-verified.
+#                 Safe to include; safe to omit.
+#
+# Loaded via the xways-trufflehog.cfg key:
+#   custom_config_path=C:\path\to\this-file.yml
+
+detectors:
+
+  # ----- Example 1: synthetic vendor API key ---------------------------------
+  # Matches "VENDORKEY_" followed by 32 hex chars. Replace with your own
+  # pattern. The test_secret line at the bottom is a comment for reviewers,
+  # not parsed by TruffleHog.
+  #
+  # author: kev365
+  # test_secret: VENDORKEY_0123456789abcdef0123456789abcdef
+  - name: example-vendor-api-key
+    keywords:
+      - vendorkey_
+    regex:
+      api_key: VENDORKEY_[0-9a-fA-F]{32}
+
+  # ----- Example 2: synthetic bearer token with verify block -----------------
+  # Demonstrates the verify section. Inert on default forensic runs
+  # (verification is off); only matters if the analyst opts into
+  # --only-verified.
+  #
+  # author: kev365
+  # test_secret: bearer eyJhbGciOiJIUzI1NiJ9.PAYLOAD.SIGNATURE_PLACEHOLDER_XX
+  - name: example-bearer-token
+    keywords:
+      - bearer
+    regex:
+      token: bearer eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
+    verify:
+      - endpoint: https://api.example.com/v1/whoami
+        unsafe: true
+        headers:
+          - "Authorization: Bearer {token}"

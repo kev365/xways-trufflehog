@@ -1,0 +1,137 @@
+#include <windows.h>
+#include "resource.h"
+
+// =============================================================================
+//  xways-trufflehog settings dialog (DIALOGEX template)
+//
+//  Layout top->bottom per docs/xtension-dialog-conventions.md:
+//    TruffleHog binary -> Input filters -> Advanced Settings ->
+//    Output -> Progress row -> Action buttons.
+//
+//  Verification is wired in the cpp (Settings.verifyMode + cfg key
+//  `verify_mode`) rather than in the dialog -- analysts who need it set
+//  `verify_mode=all|only_verified` in the cfg.
+//
+//  GROUPBOX titles are bolded at runtime via WM_SETFONT.
+// =============================================================================
+
+IDD_SETTINGS DIALOGEX 0, 0, 420, 334
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "xways-trufflehog - Settings"
+FONT 10, "MS Shell Dlg"
+BEGIN
+    // -------- TruffleHog binary group ---------------------------------
+    GROUPBOX        "TruffleHog binary",                      IDC_GROUP_TOOL,             7,   4, 406,  44
+    LTEXT           "trufflehog.exe:",                        IDC_LABEL_TOOL_BIN,        14,  18,  60,   9
+    EDITTEXT                                                  IDC_EDIT_TOOL_BIN,         76,  16, 278,  12, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...",                              IDC_BTN_BROWSE_TOOL,      358,  15,  49,  14
+    LTEXT           "",                                       IDC_LABEL_TOOL_VERSION,    14,  33, 393,   9
+
+    // -------- Input filters (full width) ------------------------------
+    //   Input column anchor x=88 for consistency with Advanced Settings
+    //   and Output groups. Labels left-aligned at x=14 (Min/Max/Skip) or
+    //   x=160 (Filter entropy under Force skip binaries).
+    GROUPBOX        "Input filters",                          IDC_GROUP_INPUT,            7,  54, 406,  70
+    // Items-to-scan line is split into three labels so the count can
+    // render bold while the prefix/tail stay regular weight.
+    LTEXT           "Items to scan:",                         IDC_LABEL_SELECTED_COUNT,  14,  66,  60,   9
+    LTEXT           "",                                       IDC_LABEL_SELECTED_COUNT_NUM, 76,  66,  88,   9
+    LTEXT           "",                                       IDC_LABEL_SELECTED_COUNT_TAIL, 166, 66, 240,   9
+    LTEXT           "Min size (bytes):",                      IDC_LABEL_MIN_SIZE,        14,  80,  72,   9
+    EDITTEXT                                                  IDC_EDIT_MIN_SIZE,         88,  78,  45,  12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Max size (MiB):",                        IDC_LABEL_MAX_SIZE,        14,  94,  72,   9
+    EDITTEXT                                                  IDC_EDIT_MAX_SIZE,         88,  92,  45,  12, ES_AUTOHSCROLL | ES_NUMBER
+    AUTOCHECKBOX    "Force skip binaries (PE/ELF/...)",       IDC_CHK_SKIP_BINARIES,    160,  80, 220,  10
+    LTEXT           "Filter entropy (>=):",                   IDC_LABEL_FILTER_ENTROPY, 160,  94,  78,   9
+    EDITTEXT                                                  IDC_EDIT_FILTER_ENTROPY,  240,  92,  40,  12, ES_AUTOHSCROLL
+    LTEXT           "Skip extensions:",                       IDC_LABEL_PREFILTER_EXT,   14, 108,  72,   9
+    EDITTEXT                                                  IDC_EDIT_PREFILTER_EXT,    88, 106, 318,  12, ES_AUTOHSCROLL
+
+    // -------- Advanced Settings group ---------------------------------
+    //   - Verification: default = --no-verification. To opt INTO
+    //     verification, analyst adds --only-verified to Extra arguments
+    //     (cpp detects it and skips --no-verification).
+    //   - Concurrency: CBS_DROPDOWNLIST combobox populated with "Auto"
+    //     + powers of 2 up to the host CPU count.
+    //   - Concurrency sits at the end of the Include detectors row;
+    //     Batch size sits at the end of the Exclude detectors row.
+    //   - Input column anchor x=88 for all single-input rows.
+    GROUPBOX        "Advanced Settings",                      IDC_GROUP_OPTIONS,          7, 128, 406,  62
+    // Concurrency + Batch size labels share x=296; both inputs at x=348,
+    // both width 58. Include/Exclude edits extend to x=292.
+    LTEXT           "Include detectors:",                     IDC_LABEL_INCLUDE_DETECTORS,14, 141,  74,   9
+    EDITTEXT                                                  IDC_EDIT_INCLUDE_DETECTORS, 88, 139, 204,  12, ES_AUTOHSCROLL
+    LTEXT           "Concurrency:",                           IDC_LABEL_CONCURRENCY,    296, 141,  50,   9
+    COMBOBOX                                                  IDC_COMBO_CONCURRENCY,    348, 139,  58, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Exclude detectors:",                     IDC_LABEL_EXCLUDE_DETECTORS,14, 156,  74,   9
+    EDITTEXT                                                  IDC_EDIT_EXCLUDE_DETECTORS, 88, 154, 204,  12, ES_AUTOHSCROLL
+    LTEXT           "Batch size:",                            IDC_LABEL_BATCH_SIZE,     296, 156,  50,   9
+    EDITTEXT                                                  IDC_EDIT_BATCH_SIZE,      348, 154,  58,  12, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Extra arguments:",                       IDC_LABEL_EXTRA_ARGS,      14, 174,  74,   9
+    EDITTEXT                                                  IDC_EDIT_EXTRA_ARGS,       88, 172, 318,  12, ES_AUTOHSCROLL
+
+    // -------- Output group --------------------------------------------
+    //   - "Add findings" is a BS_AUTO3STATE checkbox. Tri-state
+    //     semantics: unchecked = neither, indeterminate = Report Table
+    //     only, checked = Report Table + Comments column. Default = checked.
+    //   - Left column (x=14): Add findings | Export to XLSX | Split files.
+    //     Right column (x=210): Tag threshold | Keep extracted | Verbose
+    //     X-Tension log. All right-column items left-aligned at x=210
+    //     (checkbox glyph = label start).
+    GROUPBOX        "Output",                                 IDC_GROUP_OUTPUT,           7, 194, 406,  70
+    LTEXT           "Output directory:",                      IDC_LABEL_OUTPUT_DIR,      14, 208,  74,   9
+    EDITTEXT                                                  IDC_EDIT_OUTPUT_DIR,       88, 206, 266,  12, ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...",                              IDC_BTN_BROWSE_OUTPUT,    358, 205,  49,  14
+    // Row 2: Add findings (tri-state) | Tag threshold
+    AUTO3STATE      "Add findings",                           IDC_CHK_ADD_REPORT_TABLE,  14, 224, 196,  10
+    LTEXT           "Tag threshold:",                         IDC_LABEL_TAG_THRESHOLD,  210, 225,  56,   9
+    EDITTEXT                                                  IDC_EDIT_TAG_THRESHOLD,   268, 223,  40,  12, ES_AUTOHSCROLL | ES_NUMBER
+    // Row 3: Export to XLSX (tri-state) | Keep extracted
+    AUTO3STATE      "Export to XLSX",                         IDC_CHK_FINDINGS_TSV,      14, 238, 196,  10
+    AUTOCHECKBOX    "Keep extracted scratch files (under out\\..\\in\\)",
+                                                              IDC_CHK_KEEP_EXTRACTED,   210, 238, 196,  10
+    // Row 4: Split files | Verbose
+    // Edit width sized to the cue text "after 500000 rows" only.
+    LTEXT           "Split files:",                           IDC_LABEL_SPLIT_ROWS,      14, 253,  74,   9
+    EDITTEXT                                                  IDC_EDIT_SPLIT_ROWS,       88, 251,  90,  12, ES_AUTOHSCROLL | ES_NUMBER
+    AUTOCHECKBOX    "Verbose X-Tension log (Messages window)",IDC_CHK_VERBOSE,          210, 253, 196,  10
+
+    // -------- Status group (status label + progress bar) --------------
+    GROUPBOX        "Status",                                 IDC_GROUP_STATUS,           7, 268, 406,  38
+    LTEXT           "Ready.",                                 IDC_LABEL_PROGRESS_STATUS, 14, 282, 392,  10
+    CONTROL         "",                                       IDC_PROGRESS_RUN,
+                    "msctls_progress32",                      PBS_SMOOTH | WS_CHILD | WS_VISIBLE,
+                                                                                         14, 294, 392,  10
+
+    // -------- Action buttons (bottom-right per convention) ------------
+    PUSHBUTTON      "&About",                                 IDC_BTN_ABOUT,              7, 316,  50,  14
+    PUSHBUTTON      "&Open output folder",                    IDC_BTN_OPEN_OUTPUT,       63, 316,  90,  14
+    PUSHBUTTON      "Open &cfg",                              IDC_BTN_OPEN_CFG,         159, 316,  60,  14
+    DEFPUSHBUTTON   "&Run",                                   IDC_BTN_RUN,              303, 316,  50,  14
+    PUSHBUTTON      "Cancel",                                 IDCANCEL,                 359, 316,  50,  14
+END
+
+// =============================================================================
+//  About dialog
+// =============================================================================
+//  Same shape as xways-updater's About -- title + description + Author
+//  line + GitHub / LinkedIn link buttons + Buy-me-a-coffee.
+IDD_ABOUT DIALOGEX 0, 0, 280, 156
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About xways-trufflehog"
+FONT 9, "MS Shell Dlg"
+BEGIN
+    LTEXT           "xways-trufflehog",                       IDC_ABOUT_TITLE,           12,  10, 256, 12
+    LTEXT           "Per-item TruffleHog secret scanner for X-Ways Forensics.",
+                                                              IDC_ABOUT_DESC,            12,  26, 256,  9
+    LTEXT           "Wraps trufflesecurity/trufflehog v3.x. Findings are tagged in a report table and summarized in the Comments column.",
+                                                              -1,                        12,  40, 256, 20
+    LTEXT           "Author:",                                IDC_ABOUT_LABEL_AUTHOR_PREFIX, 12, 62,  30,  9
+    LTEXT           "",                                       IDC_ABOUT_AUTHOR,          44,  62, 224,  9
+    PUSHBUTTON      "https://github.com/kev365/xways-trufflehog",
+                                                              IDC_ABOUT_LINK_GITHUB,     12,  76, 256, 14
+    PUSHBUTTON      "https://www.linkedin.com/in/dfir-kev",
+                                                              IDC_ABOUT_LINK_LINKEDIN,   12,  94, 256, 14
+    PUSHBUTTON      "Buy me a coffee",                        IDC_ABOUT_BTN_COFFEE,      12, 112, 256, 14
+    DEFPUSHBUTTON   "OK",                                     IDOK,                     218, 134,  50, 14
+END

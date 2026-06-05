@@ -1,0 +1,255 @@
+# xways-trufflehog.cfg
+# =============================================================================
+# Source-tree reference cfg. Deployed alongside the DLL by build.bat. On the
+# X-Tension's first run, this file is copied to `xways-trufflehog.cfg` if no
+# .cfg exists yet -- so analysts get the same documented defaults the source
+# tree carries.
+#
+# All keys are optional. The X-Tension's compiled defaults are listed after
+# the `=` (commented). Uncomment + edit to override.
+#
+# Edits take effect on the next dialog open (use the "Open cfg" button to
+# launch your default text editor on this file).
+# =============================================================================
+
+
+# ----- TruffleHog binary -----------------------------------------------------
+# Absolute path to trufflehog.exe (v3.x). Empty = the X-Tension looks in
+#   <dll-dir>\tools\trufflehog\trufflehog.exe
+# Grab a Windows release from
+#   https://github.com/trufflesecurity/trufflehog/releases
+# trufflehog_exe=
+
+
+# ----- Output ---------------------------------------------------------------
+# Run output base. Auto-resolves to:
+#   <case dir>\xways-trufflehog\        (XWF_GetCaseProp prop 6)
+#   <evidence working dir>\xways-trufflehog\
+#   <%TEMP%>\xways-trufflehog\
+# The "xways-trufflehog" subfolder is part of the resolved path -- don't add
+# it yourself. Per-run output lands at <output_base>\run-YYYYMMDD-HHMMSS\.
+# output_base=
+
+
+# ----- Input filters --------------------------------------------------------
+# Items smaller than min_size_bytes or larger than max_size_mib MiB are
+# skipped before extraction.
+# min_size_bytes=1
+# max_size_mib=256
+
+# TruffleHog flag: skip executables / binaries entirely (PE/ELF/Mach-O).
+# Single biggest false-positive killer on a typical case image.
+# force_skip_binaries=true
+
+# Shannon-entropy threshold for unverified findings (TruffleHog --filter-entropy).
+# Drops low-entropy strings as likely false positives. Typical: 3.0.
+# Only effective with verify_mode=none (default).
+# filter_entropy=3.0
+
+# Pre-extract extension skip list -- our own gate that fires BEFORE we
+# extract bytes, saving the per-item read+write cost. CSV, lowercase,
+# no dot. Match is case-insensitive. Default covers media + compiled
+# artifacts + archive containers. Set to a single space (` `) to scan
+# every extension.
+# prefilter_extensions=jpg,jpeg,png,gif,bmp,tiff,tif,webp,svg,ico,heic,heif,raw,mp3,mp4,mov,avi,mkv,wav,flac,ogg,m4a,m4v,wmv,iso,dmg,vmdk,vhd,vhdx,qcow2,exe,dll,sys,obj,o,a,so,pdb,class,jar,zip,7z,gz,tar,rar,xz,bz2,lz4,zst
+
+
+# ----- Verification ---------------------------------------------------------
+# The X-Tension ALWAYS passes --no-verification to TruffleHog by default
+# (no outbound network calls, safe for forensic workstations).
+#
+# To enable live verification, put one of these in extra_args= below:
+#   --only-verified    keep ONLY findings that verify live
+#   --no-verification  redundant (this is the default anyway)
+#
+# NOTE: a `verify_mode=` cfg key is recognised and IGNORED at run time
+# (logs a one-line warning on load). Use extra_args= as the canonical
+# opt-in path.
+
+
+# ----- Detectors ------------------------------------------------------------
+# Comma-separated detector names. Empty `include_detectors` = all detectors.
+# `exclude_detectors` defaults to common forensic-noise classes; override
+# with a single space (` `) to keep them on.
+#
+# include_detectors=
+# exclude_detectors=URI,JDBC
+#
+# Detector reference (NOT exhaustive -- TruffleHog v3.x ships 800+):
+#
+#   Cloud / IaaS / SaaS:
+#     AWS, AWSSessionKey, GCP, GCPApplicationDefaultCredentials,
+#     AzureBatch, AzureContainerRegistry, AzureSearchAdminKey,
+#     AzureStorage, DigitalOceanV2, Linode, Vultr, Heroku,
+#     CloudflareApiToken, CloudflareGlobalApiKey, Cloudinary, Cloudsmith
+#
+#   VCS / SCM:
+#     Github, GithubApp, GithubOauth2, Gitlab, BitbucketAppPwd
+#
+#   Communications / Productivity:
+#     Slack, SlackWebhook, Discord, DiscordWebhook, Mattermost,
+#     Mailgun, Mailchimp, SendGrid, Postmark, Sparkpost, Twilio,
+#     Pagerduty, Asana, Notion, Atlassian, Pivotal, Trello, Webex
+#
+#   Databases / data stores:
+#     MongoDB, Redis, Postgres, Mysql, JDBC, Snowflake, Databricks,
+#     Elasticsearch, Algolia, MSSQL, NetSuite, Splunk
+#
+#   Payments:
+#     Stripe, Square, Paypal, Plaid, Brex, Razorpay
+#
+#   Identity / keys:
+#     PrivateKey, JWT, Auth0OAuth, Okta, OneLogin
+#
+#   Storage / file sync:
+#     Box, Dropbox, OnedriveKey, SCP, FTP
+#
+#   Dev tooling:
+#     Postman, NpmToken, Pypi, Sonatype, Sentry, Rollbar, Datadog,
+#     NewRelic, Honeycomb, Buildkite, CircleCI, TravisCI, JenkinsAPIKey
+#
+# Detectors that don't apply to filesystem scans (they need a specific live
+# source for VERIFICATION, e.g. an active GitHub repo or Docker registry --
+# the format-match part still runs and may produce unverified hits):
+#   GithubRepository, GitlabRepository, DockerhubV2
+#
+# Common noise sources (consider adding to exclude_detectors on cases with
+# many config files / connection strings):
+#   URI, JDBC, ApiVersionString, Mailchimp
+
+
+# ----- TruffleHog tuning ----------------------------------------------------
+# --concurrency. 0 = let TruffleHog choose (defaults to host CPU count).
+# concurrency=0
+#
+# To control TruffleHog's --log-level, add it to extra_args below, e.g.
+#   extra_args=--log-level=-1
+
+# ----- Custom detector pack (TruffleHog --config=<yml>) ---------------------
+# Optional. Loads a YAML pattern pack ON TOP of trufflehog's ~800 built-in
+# detectors. TruffleHog's YAML schema is documented at:
+#   https://docs.trufflesecurity.com/custom-detectors
+#
+# Empty (default): no custom config; trufflehog runs with its built-ins only.
+# Set to an absolute path to load your own YAML.
+# A whitespace-only value is also treated as "off".
+# custom_config_path=
+
+# ----- Free-form extra args -------------------------------------------------
+# Free-form extra args spliced after the built-in flags. The X-Tension never
+# strips or rewrites these. Useful additions for forensic runs:
+#
+#   --archive-max-depth=2 --archive-max-size=50MB --archive-timeout=60s
+#     Cap archive expansion. Defends against pathological zips/tars in
+#     evidence (nested archives can otherwise stall a whole batch).
+#
+#   --detector-timeout=30s
+#     Kills any single detector that runs longer than 30s on a chunk.
+#
+#   --max-decode-depth=5
+#     How many rounds of iterative decoding (base64-in-utf16 etc.). 5 is
+#     the TruffleHog default; raise for deeply-encoded malware dumps.
+#
+#   --filter-unverified
+#     Keep only the FIRST unverified result per chunk per detector. Reduces
+#     noise on bloated files where one secret appears in many copies.
+#
+#   --results=unverified,filtered_unverified
+#     Restrict output to specific result types. With verify_mode=none, the
+#     only meaningful values are `unverified` and `filtered_unverified`.
+#
+#   --include-paths=<file>   --exclude-paths=<file>
+#     Scope to / exclude path REGEXES from a file (one per line). Note:
+#     the value is a path to a file, NOT inline regex. Has limited utility
+#     since we feed TruffleHog single-file chunks anyway.
+#
+#   --print-avg-detector-time
+#     Prints per-detector average time at end of each chunk (in .err).
+#     Useful for tuning exclude_detectors.
+#
+#   --no-color
+#     TruffleHog --json already suppresses color, so this is rarely needed.
+#
+#   --fail
+#     Exit code 183 on any finding. Useful in CI, not in X-Ways context.
+#
+#   --allow-verification-overlap
+#     Allow verifying similar credentials across detectors. Only matters
+#     when verify_mode != none.
+# extra_args=
+
+
+# ----- Batch + dedup (perf) -------------------------------------------------
+# Items per TruffleHog invocation (the X-Tension extracts batchChunkSize
+# items into in\chunk-N\ then invokes TruffleHog once on that dir).
+#
+# Dialog clamp: 10 .. 5000  (settings dialog refuses values outside this
+#                            range when you click Run).
+# cfg clamp:    10 .. 20000 (this file can push to 20000 for experimental
+#                            large-batch runs; TruffleHog has no documented
+#                            input-count limit but findings accumulate in
+#                            RAM during a run, so very-large batches on
+#                            findings-heavy cases can balloon memory).
+# Special:      0 = "scan everything in a single batch". Fastest possible,
+#               but Cancel only fires when TruffleHog finishes -- on a
+#               10,000-item run that means no early-out.
+# batch_chunk_size=100
+
+# Hash-based dedup. When ON (default), the X-Tension queries X-Ways' stored
+# primary hash (XWF_GetHashValue) for each item before extracting. If we've
+# already scanned an item with the same hash earlier in this run, we tag
+# THIS item with the cached findings and skip the extract + scan entirely
+# (reported as `deduped=N` in the summary). Transparent no-op if the volume
+# has no hash type configured.
+# dedup_by_hash=true
+
+
+# ----- Output tagging -------------------------------------------------------
+# tag_threshold=1            # min findings before tagging an item
+# add_to_report_table=true   # per-detector report tables (trufflehog: AWS, ...)
+# add_comment=true           # one-line summary in the Comments column
+# keep_extracted_files=false # keep per-chunk in\ dir after the run
+
+# ----- Consolidated findings XLSX -------------------------------------------
+# Tri-state. Drives the BS_AUTO3STATE checkbox in the dialog's Output group.
+# Output file: <run>\<evidence-name>-trufflehog.xlsx (Office Open XML; opens
+# natively in Excel / LibreOffice / Google Sheets). Frozen header row +
+# autoFilter wired across the data range.
+#
+# Columns: ItemID, Name, FullPath, Detector, Verified, Line,
+#          Raw, RawV2, Redacted, Decoder, DetectorDescription
+#
+# Values:
+#   none       no XLSX written
+#   redacted   XLSX written with Raw / RawV2 partial-masked (first 3 + last 3
+#              chars kept, middle replaced with '*'; under 8 chars: first
+#              char + '*' rest). Redacted column stays as-is (TruffleHog's
+#              already-safe summary).
+#   full       XLSX written with full raw secret bytes (same exposure as the
+#              per-chunk .jsonl files in run\out\). DEFAULT.
+#
+# Note: the XLSX is written STORE-only (no compression). Files are a few MB
+# per ~10K findings; spreadsheet apps handle it fine. Per-chunk .jsonl files
+# in run\out\ remain the canonical raw form regardless of this setting.
+# findings_output=full
+
+# Split the consolidated XLSX after N findings rows. On a high-false-positive
+# run, capping the per-file size keeps each spreadsheet snappy in Excel.
+# When the total exceeds N, files get a numeric suffix:
+#   <evidence>-trufflehog-1.xlsx
+#   <evidence>-trufflehog-2.xlsx
+#   ...
+# Single-file runs keep the un-suffixed name.
+#
+# Default 500000. Hard cap 1000000 (Excel's per-sheet limit is 1,048,576;
+# we leave headroom for the header + future metadata). Values outside
+# [1, 1000000] are clamped into range.
+# findings_rows_per_sheet=500000
+
+
+# ----- X-Tension verbosity --------------------------------------------------
+# Toggles the X-Tension's own per-item LogVerbose() output to the X-Ways
+# Messages window. Distinct from TruffleHog's own --log-level (pass via
+# extra_args if you want that). Keep ON during development; OFF on large
+# snapshots.
+# xtension_verbose=true
