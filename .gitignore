@@ -39,3 +39,9 @@ tools/trufflehog/trufflehog.exe
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# --- Local working notes (kept beside the source, never published) ---------
+/CLAUDE.md.example
+/RELEASE_NOTES_*.md
+/xways-trufflehog-testdata.md
+/xways-trufflehog-row-coloring.md
