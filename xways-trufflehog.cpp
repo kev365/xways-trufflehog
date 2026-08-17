@@ -41,7 +41,7 @@
 
 // --- Identity ---------------------------------------------------------------
 static const wchar_t* NAME         = L"xways-trufflehog";
-static const wchar_t* VERSION      = L"0.1.0";
+static const wchar_t* VERSION      = L"0.1.1";
 static const wchar_t* DESCRIPTION  = L"TruffleHog secret scanner wrapper for X-Ways Forensics.";
 static const wchar_t* REPORT_TABLE = L"trufflehog: secrets found";
 
@@ -60,7 +60,10 @@ enum : DWORD {
     XT_ACTION_SHC = 5,
 };
 
-enum : DWORD { COMMENT_REPLACE = 0, COMMENT_APPEND = 1, COMMENT_PREPEND = 2 };
+// XWF_AddComment nFlagsHowToAdd (official page, verified live 21.8 SR-5
+// 2026-08-15): 0 replaces, 1 appends with a space delimiter, 2 appends
+// with a line-break delimiter. There is NO prepend mode.
+enum : DWORD { COMMENT_REPLACE = 0, COMMENT_APPEND = 1, COMMENT_APPEND_LINEBREAK = 2 };
 
 // --- Dialog message IDs (worker -> dialog) ---------------------------------
 #define WM_APP_PROGRESS   (WM_APP + 1)  // wp = permille (0..1000)
@@ -68,6 +71,14 @@ enum : DWORD { COMMENT_REPLACE = 0, COMMENT_APPEND = 1, COMMENT_PREPEND = 2 };
 #define WM_APP_DONE       (WM_APP + 3)  // wp = success bool
 #define WM_APP_MARQUEE    (WM_APP + 4)  // wp = 1 start marquee, 0 stop
 #define WM_APP_VERSION    (WM_APP + 5)  // lp = heap-allocated std::wstring* (dialog owns + deletes)
+
+// XT_Init's 4th parameter (git HEAD c46a1bd2, 2024-07-26; formerly void*).
+struct LicenseInfo {
+    DWORD nVersion;
+    DWORD nFlags;
+    HANDLE hMainWnd;
+    struct LicenseInfo* pLicInfo;
+};
 
 // --- XWF_* typedefs --------------------------------------------------------
 typedef VOID   (__stdcall *pfn_XWF_OutputMessage)(const wchar_t*, DWORD);
@@ -304,37 +315,6 @@ struct Collected {
 };
 static Collected g_collected;
 
-// --- Managed-mode (xways-xt-manager) state ---------------------------------
-//   When this DLL is hosted by xways-xt-manager (instead of loaded directly
-//   by X-Ways), the manager creates the embedded settings dialog with
-//   lParam=0. The dialog proc + PopulateDialog need a Settings* / RunCtx* to
-//   read/write; in managed mode they fall back to these module-local objects.
-//
-//   Lifecycle (mirrors the standalone XT_Prepare -> XT_ProcessItem ->
-//   XT_Finalize flow, but driven by the manager's On* callbacks):
-//     TrufflehogOnInit      -> resolve XWF_*, set g_managed_mode, LoadCfg into
-//                              g_managed_settings so the embedded dialog shows
-//                              cfg defaults at first display.
-//     TrufflehogOnPrepare   -> reset g_managed_collected + stash volume/evidence
-//                              handles; return true so the manager fans out
-//                              per-item callbacks.
-//     TrufflehogOnProcessItem(Ex) -> collect item IDs (mirror XT_ProcessItem).
-//     TrufflehogHarvestSettings   -> read embedded dialog controls back into
-//                              g_managed_settings (called by the manager
-//                              immediately before OnFinalize-equivalent run).
-//     TrufflehogOnFinalize  -> THE BATCH RUN POINT. Build a RunCtx from the
-//                              collected items + run WorkerThread SYNCHRONOUSLY
-//                              with hDlg=NULL (no embedded-dialog progress in
-//                              logs stream to the X-Ways Messages window).
-//
-//   on_finalize (not on_prepare) runs the scan because trufflehog needs the
-//   filter-respected item set, which only exists after every on_process_item
-//   call completes. This differs from hindsight / ual-timeliner (which
-//   enumerate their own items inside on_prepare and run there).
-static bool      g_managed_mode = false;
-static Settings  g_managed_settings;
-static RunCtx    g_managed_runctx;     // fallback for SettingsDlgProc / PopulateDialog
-static Collected g_managed_collected;  // item IDs gathered via OnProcessItem(Ex)
 
 // =============================================================================
 //  Helpers — logging, encoding, paths, files
@@ -603,7 +583,10 @@ static std::wstring SerializeSettings(const Settings& s) {
 
     o += L"# ----- TruffleHog binary -----\r\n";
     o += L"trufflehog_exe="; o += s.trufflehogExe; o += L"\r\n";
-    o += L"output_base=";    o += s.outputBase;    o += L"\r\n\r\n";
+    // output_base is intentionally NOT persisted -- output follows the case
+    // (<caseRoot>\xways-trufflehog default, re-seeded per case; see the
+    // output-dir convention). A legacy output_base= key in an existing cfg is
+    // still honored on load as a deliberate analyst override.
 
     o += L"# ----- Input filters -----\r\n";
     o += L"min_size_bytes="       + std::to_wstring(s.minSizeBytes) + L"\r\n";
@@ -809,19 +792,47 @@ static void LoadCfg(const std::wstring& path, Settings& s) {
 // =============================================================================
 //  Subprocess invocation
 // =============================================================================
-//   RunCommand: redirect stdout/stderr via cmd.exe, wait for exit.
+//   RunCommand: spawn the child DIRECTLY with real std handles -- stdin from
+//   \NUL, stdout/stderr to caller-supplied files. X-Ways is a GUI-subsystem
+//   host with no console, so the child must never inherit its null std
+//   handles (see the subprocess-stdio convention); the previous cmd.exe
+//   "> file 2> file" indirection is gone (quoting fragility, extra process).
 //   RunCaptureStdout: read child stdout into a string (for --version probe).
 static bool RunCommand(const std::wstring& cmdline, const std::wstring& workingDir,
+                       const std::wstring& stdoutPath, const std::wstring& stderrPath,
                        DWORD& exitCodeOut) {
+    exitCodeOut = (DWORD)-1;
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
+    HANDLE hNul = CreateFileW(L"NUL", GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                              OPEN_EXISTING, 0, nullptr);
+    HANDLE hOut = CreateFileW(stdoutPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE hErr = CreateFileW(stderrPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hNul == INVALID_HANDLE_VALUE || hOut == INVALID_HANDLE_VALUE ||
+        hErr == INVALID_HANDLE_VALUE) {
+        Log(L"RunCommand: failed to open NUL / stdout / stderr handles");
+        if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
+        if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+        if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+        return false;
+    }
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = hNul;
+    si.hStdOutput = hOut;
+    si.hStdError  = hErr;
+    PROCESS_INFORMATION pi = {};
     std::vector<wchar_t> mut(cmdline.begin(), cmdline.end());
     mut.push_back(L'\0');
-    STARTUPINFOW si = {}; si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    BOOL ok = CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE,
+    BOOL ok = CreateProcessW(nullptr, mut.data(), nullptr, nullptr,
+                             TRUE,  // inherit handles so NUL + the log files reach the child
                              CREATE_NO_WINDOW, nullptr,
                              workingDir.empty() ? nullptr : workingDir.c_str(),
                              &si, &pi);
-    if (!ok) { exitCodeOut = (DWORD)-1; return false; }
+    CloseHandle(hNul); CloseHandle(hOut); CloseHandle(hErr);
+    if (!ok) return false;
     WaitForSingleObject(pi.hProcess, INFINITE);
     GetExitCodeProcess(pi.hProcess, &exitCodeOut);
     CloseHandle(pi.hProcess);
@@ -834,16 +845,22 @@ static DWORD RunCaptureStdout(const std::wstring& cmd, std::string& out, DWORD t
     HANDLE hRead = nullptr, hWrite = nullptr;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return (DWORD)-1;
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+    // stdin from \NUL -- GetStdHandle(STD_INPUT_HANDLE) is NULL in a GUI
+    // host, and a child probing stdin must get a real (empty) handle.
+    HANDLE hNulIn = CreateFileW(L"NUL", GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                OPEN_EXISTING, 0, nullptr);
     STARTUPINFOW si = {}; si.cb = sizeof(si);
     si.dwFlags    = STARTF_USESTDHANDLES;
     si.hStdOutput = hWrite;
     si.hStdError  = hWrite;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdInput  = (hNulIn != INVALID_HANDLE_VALUE) ? hNulIn : nullptr;
     PROCESS_INFORMATION pi = {};
     std::vector<wchar_t> cmdline(cmd.begin(), cmd.end()); cmdline.push_back(L'\0');
     BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
                              CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(hWrite);
+    if (hNulIn != INVALID_HANDLE_VALUE) CloseHandle(hNulIn);
     if (!ok) { CloseHandle(hRead); return (DWORD)-1; }
     out.clear();
     char buf[1024];
@@ -1648,9 +1665,7 @@ static void RecordHit(LONG nItemID, const std::wstring& fullPath,
 // folding in all relevant Settings flags. Used by ProcessBatch so the
 // per-item and per-batch code paths share one flag-building source.
 static std::wstring BuildTrufflehogCmd(const Settings& s,
-                                       const std::wstring& target,
-                                       const std::wstring& outJsonl,
-                                       const std::wstring& errLog) {
+                                       const std::wstring& target) {
     std::wstring flags;
     // Verification policy. ALWAYS emit --no-verification unless the
     // analyst put an opt-in flag in Extra arguments. The cfg key
@@ -1678,14 +1693,12 @@ static std::wstring BuildTrufflehogCmd(const Settings& s,
     // to override the default verbosity.
     if (!s.extraArgs.empty()) { flags += L" "; flags += s.extraArgs; }
 
-    return L"cmd.exe /C \""
-         + std::wstring(L"\"") + s.trufflehogExe + L"\""
+    // Bare command line -- stdout/stderr redirection is done with real file
+    // handles in RunCommand, not via a cmd.exe wrapper.
+    return std::wstring(L"\"") + s.trufflehogExe + L"\""
          + L" filesystem --json --no-update"
          + flags
-         + L" \"" + target + L"\""
-         + L" > \"" + outJsonl + L"\""
-         + L" 2> \"" + errLog + L"\""
-         + L"\"";
+         + L" \"" + target + L"\"";
 }
 
 // Parse the leading "<id>_" prefix of a basename into LONG itemID. Returns
@@ -1939,10 +1952,10 @@ static void ProcessBatch(WorkerCtx* w,
                     L"");
     std::wstring chunkOutJsonl = w->outDir + L"\\chunk-" + std::to_wstring(chunkIdx) + L".jsonl";
     std::wstring chunkErrLog   = w->outDir + L"\\chunk-" + std::to_wstring(chunkIdx) + L".err";
-    std::wstring cmd = BuildTrufflehogCmd(*w->s, chunkInDir, chunkOutJsonl, chunkErrLog);
+    std::wstring cmd = BuildTrufflehogCmd(*w->s, chunkInDir);
 
     DWORD exitCode = 0;
-    if (!RunCommand(cmd, w->runDir, exitCode)) {
+    if (!RunCommand(cmd, w->runDir, chunkOutJsonl, chunkErrLog, exitCode)) {
         Log(FormatW(L"batch %zu: trufflehog subprocess failed", chunkIdx));
         ++w->failures;
         if (!w->s->keepExtracted) RecursiveDeleteDir(chunkInDir);
@@ -3188,19 +3201,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
 
     switch (msg) {
     case WM_INITDIALOG: {
-        // Standalone mode passes a std::pair<Settings*, RunCtx*>* via lParam.
-        // Managed mode (xways-xt-manager host) creates the embedded dialog
-        // with lParam=0 — fall back to the module-local managed objects so the
-        // dialog populates from cfg defaults and TrufflehogHarvestSettings has
-        // somewhere to read controls back into. Mirrors hindsight's
-        // g_managed_state / ual-timeliner's g_managed_dlg_state fallback.
-        if (lp) {
+        // ShowDialogAndRun passes a std::pair<Settings*, RunCtx*>* via lParam.
+        if (!lp) return FALSE;
+        {
             auto* pair = reinterpret_cast<std::pair<Settings*, RunCtx*>*>(lp);
             s   = pair->first;
             ctx = pair->second;
-        } else {
-            s   = &g_managed_settings;
-            ctx = &g_managed_runctx;
         }
         ApplyTitleIcon(hDlg);
         PopulateDialog(hDlg, s, ctx);
@@ -3511,6 +3517,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             if (g_workerThread) return TRUE;  // already running
             if (!s || !ctx) return TRUE;
             if (!ReadDialogToSettings(hDlg, *s)) return TRUE;
+            g_verbose = s->verbose;  // checkbox state takes effect immediately
 
             // Save the dialog state to the cfg every click (Run AND
             // Ctrl+Run). Keeps the cfg in sync with what the analyst
@@ -3524,24 +3531,29 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
             // rejected, so reaching this branch via the standard Run gate
             // shouldn't happen, but Ctrl+Run is allowed even with Run
             // visually labelled "Save", so the guard is load-bearing.
+            // Ctrl held at click time = "save only, don't run". Check
+            // GetKeyState NOT the cached timer state -- the timer
+            // is a UI-label hint; this read is the source of truth.
+            bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
             if (g_helperRejected) {
                 Log(L"skipping cfg-save: helper-exe rejected -- pick a valid trufflehog.exe via Browse before saving");
             } else {
                 std::wstring cfgPath = GetSelfDirectory() + L"\\xways-trufflehog.cfg";
                 if (SaveSettingsToCfg(cfgPath, *s)) {
-                    LogVerbose(L"saved cfg: " + cfgPath);
+                    // A deliberate Ctrl+Run save always confirms in the
+                    // Messages window; the implicit save-on-Run stays at
+                    // verbose level to avoid per-run noise.
+                    if (ctrlHeld) Log(L"settings saved to cfg (Ctrl+Run): " + cfgPath);
+                    else          LogVerbose(L"saved cfg: " + cfgPath);
                 } else {
                     Log(L"warning: could not save cfg to " + cfgPath);
                 }
             }
 
-            // Ctrl held at click time = "save only, don't run". Check
-            // GetKeyState NOT the cached timer state -- the timer
-            // is a UI-label hint; this read is the source of truth.
-            bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (ctrlHeld) {
                 SetDlgItemTextW(hDlg, IDC_LABEL_PROGRESS_STATUS,
-                                L"Settings saved to cfg. (Ctrl+Run: scan NOT started.)");
+                                L"Settings saved to cfg.");
                 return TRUE;
             }
 
@@ -3593,6 +3605,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM l
                     return TRUE;
                 }
                 if (!ReadDialogToSettings(hDlg, *s)) return TRUE;
+                g_verbose = s->verbose;  // checkbox state takes effect immediately
                 wchar_t fileBuf[MAX_PATH] = L"xways-trufflehog.cfg";
                 OPENFILENAMEW ofn = {};
                 ofn.lStructSize  = sizeof(ofn);
@@ -3831,6 +3844,9 @@ static void ShowDialogAndRun(const Collected& c) {
     std::wstring cfgPath = GetSelfDirectory() + L"\\xways-trufflehog.cfg";
     EnsureCfgExists(cfgPath);   // creates from .example or embedded defaults if absent
     LoadCfg(cfgPath, s);
+    // Honor the cfg's xtension_verbose immediately -- otherwise LogVerbose
+    // stays at its compile-time default until the first worker run syncs it.
+    g_verbose = s.verbose;
     if (s.trufflehogExe.empty()) s.trufflehogExe = ResolveDefaultTrufflehog();
     // Version probe is deferred to a worker thread kicked off in WM_INITDIALOG
     // (StartAsyncVersionProbe). Running it synchronously here stacks a ~2-5s
@@ -3872,6 +3888,29 @@ static void ShowDialogAndRun(const Collected& c) {
     ctx.hEvidence      = c.hEvidence;
     ctx.invocationMode = c.invocationMode;
     ctx.items          = c.items;
+
+    // RUN mode (op=0, Tools -> Run X-Tension) delivers NO per-item callbacks
+    // despite XT_Prepare's 0x01 -- verified live on 21.8 SR-5 and 21.9 Beta 1
+    // -- so the collector arrives empty. Fall back to enumerating the whole
+    // volume snapshot (item IDs 0..XWF_GetItemCount-1). The active Directory
+    // Browser filter CANNOT be honored here: per-item callbacks are the only
+    // filter-aware path, and they simply don't fire under op=0. Analysts who
+    // need filter- or selection-scoped runs use RVS or right-click (DBC),
+    // which keep the callback-collected path above. The settings dialog still
+    // gates the run, and min/max-size + extension prefilters do the real
+    // narrowing.
+    if (ctx.items.empty() && ctx.invocationMode == InvocationMode::Run &&
+        ctx.hVolume && XWF_GetItemCount) {
+        DWORD total = XWF_GetItemCount(nullptr);
+        Log(FormatW(L"RUN mode: X-Ways delivers no per-item callbacks under "
+                    L"op=0 (expected on 21.8+) -- falling back to full-snapshot "
+                    L"enumeration (%lu items). The active filter is NOT honored "
+                    L"in this mode; use RVS or a right-click selection for "
+                    L"scoped runs.", (unsigned long)total));
+        ctx.items.reserve(total);
+        for (DWORD i = 0; i < total; ++i) ctx.items.push_back((LONG)i);
+    }
+
     // Pre-classify items so the dialog can show a count that matches what
     // we'll actually scan. X-Ways calls XT_ProcessItem for every item in
     // scope including the directory items themselves; ShouldScan filters
@@ -3898,8 +3937,8 @@ static void ShowDialogAndRun(const Collected& c) {
     }
     if (ctx.items.empty()) {
         MessageBoxW(g_hMainWnd,
-            L"No items in scope.\n\nEither nothing was selected, or the active "
-            L"X-Ways filter excluded every item in this view.",
+            L"No items in scope.\n\nNothing was selected (right-click "
+            L"invocation), or the volume snapshot reports no items.",
             NAME, MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -3915,7 +3954,7 @@ static void ShowDialogAndRun(const Collected& c) {
 // =============================================================================
 extern "C" {
 
-LONG __stdcall XT_Init(DWORD nVersion, DWORD /*nFlags*/, HWND hMainWnd, void*) {
+LONG __stdcall XT_Init(DWORD nVersion, DWORD /*nFlags*/, HWND hMainWnd, LicenseInfo* /*license*/) {
     g_hMainWnd = hMainWnd;
     INITCOMMONCONTROLSEX icc = {};
     icc.dwSize = sizeof(icc);
@@ -4016,274 +4055,6 @@ LONG __stdcall XT_Finalize(HANDLE, HANDLE, DWORD, void*) {
 LONG __stdcall XT_Done(void*) { Log(L"XT_Done"); return 0; }
 
 } // extern "C"
-
-// =============================================================================
-//  Manager-plugin integration (xways-xt-manager)
-// =============================================================================
-//   Lets the SAME DLL load as a plugin under xways-xt-manager. The manager
-//   finds us via the XwaysManagerPluginEntry export below. The On* callbacks
-//   delegate to the EXISTING standalone internals (RetrieveFunctionPointers,
-//   LoadCfg, the worker batch pipeline) — managed mode never shows the modal
-//   settings dialog; the embedded tab the manager already hosts handles
-//   settings, and TrufflehogHarvestSettings reads them back.
-//
-//   Run model bridge (see the g_managed_* comment block near g_collected):
-//   trufflehog is a per-item-COLLECT + BATCH-SCAN tool. The scan itself runs
-//   inside WorkerThread (extract item chunks -> invoke trufflehog.exe once per
-//   chunk -> parse JSONL -> tag). Standalone launches WorkerThread on a
-//   separate thread from the dialog's Run button and pumps WM_APP_* progress
-//   back to the dialog. Managed mode has no trufflehog-owned message loop, so
-//   we run WorkerThread SYNCHRONOUSLY on the manager's calling thread with
-//   hDlg=NULL — every Post*()/PostMessageW() is a guarded no-op when hDlg is
-//   NULL, so the worker completes inline and returns. (Mirrors how
-//   xways-ual-timeliner-xtmgr's UalOnPrepare calls WorkerEntry synchronously.)
-//
-//   Why OnFinalize runs the scan (not OnPrepare): trufflehog scans the exact
-//   filter-respected item set X-Ways enumerates via the per-item callbacks,
-//   which is only complete after the last OnProcessItem fires — i.e. at
-//   finalize. hindsight / ual-timeliner instead discover their own items
-//   inside OnPrepare and run there.
-
-#include "manager-plugin.h"
-
-static bool __stdcall TrufflehogOnInit(HMODULE, HWND hMainWnd, void*) {
-    g_hMainWnd = hMainWnd;
-
-    INITCOMMONCONTROLSEX icc = {};
-    icc.dwSize = sizeof(icc);
-    icc.dwICC  = ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
-    InitCommonControlsEx(&icc);
-
-    int missing = RetrieveFunctionPointers();
-    Log(FormatW(L"%s %s \x2014 managed mode via xways-xt-manager (%d missing exports)",
-                NAME, VERSION, missing));
-    if (missing > 0) {
-        Log(L"required XWF_* exports missing \x2014 plugin disabled");
-        return false;
-    }
-
-    g_managed_mode = true;
-    // Prime managed settings from the sidecar cfg so the embedded dialog has
-    // something to show at first open and a cfg-only managed run (analyst
-    // never touches the tab) still works end-to-end.
-    std::wstring cfgPath = GetSelfDirectory() + L"\\xways-trufflehog.cfg";
-    EnsureCfgExists(cfgPath);
-    LoadCfg(cfgPath, g_managed_settings);
-    if (g_managed_settings.trufflehogExe.empty())
-        g_managed_settings.trufflehogExe = ResolveDefaultTrufflehog();
-    // Point the dialog-fallback RunCtx at sane defaults for first display.
-    g_managed_runctx = RunCtx{};
-    return true;
-}
-
-static void __stdcall TrufflehogHarvestSettings(HWND hEmbeddedDlg, void*) {
-    if (!hEmbeddedDlg) return;
-    // Reuse the standalone control->Settings reader. ReadDialogToSettings may
-    // pop a MessageBox + return false if the exe field is empty/missing; in
-    // managed mode we still want whatever the analyst typed for the OTHER
-    // fields, so read the exe path ourselves first (no modal), then let
-    // ReadDialogToSettings fill the rest. If it bails on the exe gate, the
-    // fields it already wrote (none, since the exe check is first) are
-    // unaffected — so we mirror its body for the exe and call it for the rest.
-    wchar_t buf[1024] = {0};
-    GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_TOOL_BIN, buf, _countof(buf));
-    g_managed_settings.trufflehogExe = TrimW(buf);
-
-    // ReadDialogToSettings's only early-out is the exe-existence gate. When the
-    // exe IS valid it reads every field; when it's not, it returns false after
-    // showing a warning. To avoid a modal during harvest AND still capture all
-    // fields, temporarily satisfy the gate check by reading the rest directly
-    // only when the exe is missing; otherwise delegate to the shared reader.
-    if (!g_managed_settings.trufflehogExe.empty() &&
-        FileExists(g_managed_settings.trufflehogExe)) {
-        // Valid exe -> shared reader fills every field (it re-reads the exe,
-        // which matches what we set above).
-        ReadDialogToSettings(hEmbeddedDlg, g_managed_settings);
-    } else {
-        // No valid exe yet (analyst still configuring). Read the non-exe
-        // fields directly so their choices aren't lost, skipping the modal.
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_OUTPUT_DIR, buf, _countof(buf));
-        g_managed_settings.outputBase = TrimW(buf);
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_MIN_SIZE, buf, _countof(buf));
-        g_managed_settings.minSizeBytes = ParseInt64(buf, 1);
-        if (g_managed_settings.minSizeBytes < 0) g_managed_settings.minSizeBytes = 0;
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_MAX_SIZE, buf, _countof(buf));
-        g_managed_settings.maxSizeMiB = ParseInt64(buf, 256);
-        if (g_managed_settings.maxSizeMiB < 0) g_managed_settings.maxSizeMiB = 0;
-        g_managed_settings.forceSkipBinaries =
-            IsDlgButtonChecked(hEmbeddedDlg, IDC_CHK_SKIP_BINARIES) == BST_CHECKED;
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_FILTER_ENTROPY, buf, _countof(buf));
-        g_managed_settings.filterEntropy = TrimW(buf);
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_PREFILTER_EXT, buf, _countof(buf));
-        g_managed_settings.prefilterExtensions = TrimW(buf);
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_INCLUDE_DETECTORS, buf, _countof(buf));
-        g_managed_settings.includeDetectors = TrimW(buf);
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_EXCLUDE_DETECTORS, buf, _countof(buf));
-        g_managed_settings.excludeDetectors = TrimW(buf);
-        GetDlgItemTextW(hEmbeddedDlg, IDC_EDIT_EXTRA_ARGS, buf, _countof(buf));
-        g_managed_settings.extraArgs = TrimW(buf);
-        g_managed_settings.verbose =
-            IsDlgButtonChecked(hEmbeddedDlg, IDC_CHK_VERBOSE) == BST_CHECKED;
-    }
-
-    // Persist immediately so the next session inherits the analyst's choices,
-    // matching the standalone IDOK behaviour (which also saves on Run).
-    std::wstring cfgPath = GetSelfDirectory() + L"\\xways-trufflehog.cfg";
-    if (!SaveSettingsToCfg(cfgPath, g_managed_settings))
-        Log(L"warning: could not save cfg from managed harvest to " + cfgPath);
-}
-
-static bool __stdcall TrufflehogOnPrepare(HANDLE hVolume, HANDLE hEvidence,
-                                          DWORD nOpType, void*) {
-    // Stash handles + reset the collector. Return true so the manager fans out
-    // per-item callbacks; the actual scan runs in TrufflehogOnFinalize once
-    // the filter-respected item set is complete.
-    g_managed_collected = Collected{};
-    g_managed_collected.ready          = true;
-    g_managed_collected.hVolume        = hVolume;
-    g_managed_collected.hEvidence      = hEvidence;
-    g_managed_collected.invocationMode = (nOpType == XT_ACTION_DBC)
-        ? InvocationMode::Selection : InvocationMode::Run;
-    wchar_t volName[260] = {0};
-    if (hVolume && XWF_GetVolumeName) XWF_GetVolumeName(hVolume, volName, 0);
-    Log(FormatW(L"managed OnPrepare op=%lu volume=%s", (unsigned long)nOpType,
-                volName[0] ? volName : L"(none)"));
-    return true;
-}
-
-static LONG __stdcall TrufflehogOnProcessItem(LONG nItemID, HANDLE, void*) {
-    // Mirror standalone XT_ProcessItem's collection (the manager owns the
-    // PeekMessage/abort plumbing, so we just accumulate here).
-    if (!g_managed_collected.ready) return 0;
-    g_managed_collected.items.push_back(nItemID);
-    return 0;
-}
-
-static bool __stdcall TrufflehogOnFinalize(HANDLE hVolume, HANDLE hEvidence,
-                                           DWORD /*nOpType*/, void*) {
-    if (!g_managed_collected.ready) return true;
-
-    // ---- Build the Settings for this run from the harvested managed state.
-    Settings s = g_managed_settings;
-    if (s.trufflehogExe.empty()) s.trufflehogExe = ResolveDefaultTrufflehog();
-    if (s.trufflehogExe.empty() || !FileExists(s.trufflehogExe)) {
-        Log(L"trufflehog.exe not found \x2014 set 'trufflehog_exe' in the cfg or "
-            L"the TruffleHog tab, or drop trufflehog.exe next to the DLL");
-        g_managed_collected = Collected{};
-        return false;
-    }
-    // Helper-exe identity gate: the standalone dialog confirms the binary
-    // identifies as TruffleHog via the canonical PE VERSIONINFO + --version
-    // banner check (PeIdentityContains || banner substring) before enabling
-    // Run. Managed mode has no dialog to flash, so we just verify, log, and
-    // bail on rejection.
-    {
-        std::wstring versionLine, detail;
-        bool ok = VerifyHelperIdentity(s.trufflehogExe, kHelperIdentityNeedle,
-                                       versionLine, detail);
-        if (!ok) {
-            Log(L"helper-exe REJECTED (" + s.trufflehogExe + L") -- " + detail +
-                L" -- refusing to run");
-            g_managed_collected = Collected{};
-            return false;
-        }
-        Log(L"helper-exe accepted (" + s.trufflehogExe + L") -- " + detail);
-        s.trufflehogVersion = versionLine;
-    }
-
-    // Output base: default to the current case's <case>\xways-trufflehog when
-    // the harvested/cfg value is empty or points outside the current case
-    // (same logic as ShowDialogAndRun).
-    {
-        std::wstring caseDir = GetCaseDirectory();
-        bool cfgPathIsForDifferentCase = !caseDir.empty() && !s.outputBase.empty() &&
-            (s.outputBase.size() < caseDir.size() ||
-             _wcsnicmp(s.outputBase.c_str(), caseDir.c_str(), caseDir.size()) != 0);
-        if (s.outputBase.empty() || cfgPathIsForDifferentCase) {
-            std::wstring src;
-            s.outputBase = ResolveDefaultOutputBase(hEvidence, src);
-        }
-    }
-    // Prefilter-extensions default (matches ShowDialogAndRun).
-    if (s.prefilterExtensions.empty()) {
-        s.prefilterExtensions =
-            L"jpg,jpeg,png,gif,bmp,tiff,tif,webp,svg,ico,heic,heif,raw,"
-            L"mp3,mp4,mov,avi,mkv,wav,flac,ogg,m4a,m4v,wmv,"
-            L"iso,dmg,vmdk,vhd,vhdx,qcow2,"
-            L"exe,dll,sys,obj,o,a,so,pdb,class,jar,"
-            L"zip,7z,gz,tar,rar,xz,bz2,lz4,zst";
-    }
-
-    // ---- Build the RunCtx the worker consumes.
-    RunCtx ctx;
-    ctx.hVolume        = hVolume ? hVolume : g_managed_collected.hVolume;
-    ctx.hEvidence      = hEvidence ? hEvidence : g_managed_collected.hEvidence;
-    ctx.invocationMode = g_managed_collected.invocationMode;
-    ctx.items          = g_managed_collected.items;
-
-    if (!ctx.hVolume) {
-        Log(L"managed run needs a volume handle to read item bytes, but X-Ways "
-            L"did not provide one (Case Root window?). Run inside a partition / "
-            L"image instead.");
-        g_managed_collected = Collected{};
-        return false;
-    }
-    if (ctx.items.empty()) {
-        Log(L"managed run: no items in scope (nothing selected or filter "
-            L"excluded everything)");
-        g_managed_collected = Collected{};
-        return true;
-    }
-
-    Log(FormatW(L"managed run: scanning %zu item(s) with %s",
-                ctx.items.size(), s.trufflehogVersion.c_str()));
-
-    // ---- Run the batch worker SYNCHRONOUSLY on this (manager) thread.
-    //   hDlg=NULL routes every Post*/PostMessageW to a no-op; WorkerThread
-    //   does not self-join or touch g_worker/g_workerThread, so a local
-    //   WorkerCtx is fully self-contained. Logs stream to the Messages window.
-    WorkerCtx w;
-    w.s    = &s;
-    w.ctx  = &ctx;
-    w.hDlg = nullptr;
-    WorkerThread(&w);   // returns when the scan + findings export complete
-
-    g_managed_collected = Collected{};
-    return true;
-}
-
-extern "C" __declspec(dllexport)
-const XwaysManagerPluginDescriptor* __stdcall XwaysManagerPluginEntry(void) {
-    static const XwaysManagerPluginDescriptor desc = {
-        XWAYS_MANAGER_PLUGIN_ABI_VERSION,
-        sizeof(XwaysManagerPluginDescriptor),
-
-        L"xways-trufflehog",
-        L"TruffleHog",
-        L"Secret scanner. Extracts in-scope items + runs trufflehog over them "
-        L"in batches + tags findings in a Report Table.",
-        VERSION,
-
-        IDD_SETTINGS,   // tab_dialog_resource_id (Option A — manager retrofits styles at embed time)
-        0,              // tab_dialog_embedded_resource_id (Option B; 0 = use Option A path)
-        SettingsDlgProc,
-
-        TrufflehogOnInit,
-        TrufflehogOnPrepare,
-        TrufflehogOnProcessItem, // on_process_item: collect item IDs (matches
-                                 // standalone XT_ProcessItem; manager requests
-                                 // X-Ways flag 0x01 because this is non-NULL)
-        nullptr,                 // on_process_item_ex: not used (no per-item handle needed)
-        TrufflehogOnFinalize,    // batch scan runs here
-
-        true,           // default_enabled
-        nullptr,        // reserved
-
-        // -------- Post-v1 additive fields --------
-        TrufflehogHarvestSettings
-    };
-    return &desc;
-}
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) g_hSelf = hModule;

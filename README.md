@@ -54,6 +54,8 @@ The `tools\trufflehog\` path is **relative to the DLL folder**, not the X-Ways i
 
 Tools → Run X-Tensions... → **+** → pick `xways-trufflehog.dll` → tune the dialog → click **Run**. Right-click a Directory-Browser selection and pick the same menu to scan just the selected items.
 
+> **Scope note (X-Ways 21.8+):** the Tools → Run X-Tensions... path scans the **whole volume snapshot** — X-Ways no longer delivers per-item callbacks for that invocation, so the active Directory Browser filter cannot scope it (a Messages line notes this at run time). For filter- or selection-scoped scans, narrow the view with filters, select the items (Ctrl+A), and use the right-click path.
+
 **First-run sanity check**: confirm the dialog's `Version:` line reads `trufflehog 3.x.x` (not bold red) before clicking Run — that means the helper-exe identity probe accepted the binary.
 
 **Ctrl+Run** saves the current dialog state to the sidecar cfg without launching a scan. **Ctrl+Close** opens a Save-as picker to export the current settings to a chosen path.

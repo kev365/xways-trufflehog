@@ -135,3 +135,36 @@ BEGIN
     PUSHBUTTON      "Buy me a coffee",                        IDC_ABOUT_BTN_COFFEE,      12, 112, 256, 14
     DEFPUSHBUTTON   "OK",                                     IDOK,                     218, 134,  50, 14
 END
+
+// =============================================================================
+//  Version resource -- keep FILEVERSION/strings in sync with VERSION in the .cpp
+//  and the README (docs/conventions/versioning.md).
+// =============================================================================
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,1,0
+ PRODUCTVERSION 0,1,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Kevin Stokes"
+            VALUE "FileDescription",  "TruffleHog secret scanner wrapper for X-Ways Forensics"
+            VALUE "FileVersion",      "0.1.1"
+            VALUE "InternalName",     "xways-trufflehog"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Kevin Stokes. MIT License."
+            VALUE "OriginalFilename", "xways-trufflehog.dll"
+            VALUE "ProductName",      "xways-trufflehog"
+            VALUE "ProductVersion",   "0.1.1"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
